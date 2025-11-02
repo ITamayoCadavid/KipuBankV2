@@ -34,8 +34,27 @@ Incluye control por roles, soporte multi-token (ETH + ERC20s), oráculos Chainli
 
 
 ## Dirección del contrato (Sepolia)
-`0x9abac65f17dbee791518b8859c25ea0aeccd22ee`  
-https://sepolia.etherscan.io/address/0x9abac65f17dbee791518b8859c25ea0aeccd22ee
+Etherscan verification skipped: API key not found in global Settings.
+Sourcify verification successful.
+https://repo.sourcify.dev/11155111/0x236aDE80a31556142eC405020F60dF7E09D9e277/
+Routescan verification successful.
+https://testnet.routescan.io/address/0x236aDE80a31556142eC405020F60dF7E09D9e277/contract/11155111/code
+Dirección del contrato desplegado:
+0x236aDE80a31556142eC405020F60dF7E09D9e277
+
+Red utilizada:
+Sepolia Testnet
+
+Contrato verificado en:
+🔹 Sourcify
+
+🔹 Routescan
+
+Sourcify 
+ https://repo.sourcify.dev/11155111/0x236aDE80a31556142eC405020F60dF7E09D9e277/
+
+Routescan 
+ https://testnet.routescan.io/address/0x236aDE80a31556142eC405020F60dF7E09D9e277/contract/11155111/code
 
 ## Autora
 Isabela Tamayo 
