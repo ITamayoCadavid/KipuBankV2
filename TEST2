@@ -1,0 +1,233 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "https://github.com/OpenZeppelin/openzeppelin-contracts/blob/v4.9.3/contracts/security/ReentrancyGuard.sol";
+import "https://github.com/OpenZeppelin/openzeppelin-contracts/blob/v4.9.3/contracts/token/ERC20/IERC20.sol";
+import "https://github.com/OpenZeppelin/openzeppelin-contracts/blob/v4.9.3/contracts/token/ERC20/utils/SafeERC20.sol";
+
+interface IUniswapV2RouterMock {
+    function swapExactETHForTokens(uint256 amountOutMin, address tokenOut, address to) external payable returns (uint256);
+    function swapExactTokensForETH(uint256 amountIn, uint256 amountOutMin, address tokenIn, address to) external returns (uint256);
+    function swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMin, address tokenIn, address tokenOut, address to) external returns (uint256);
+}
+
+contract KipuBankV3 is ReentrancyGuard {
+    using SafeERC20 for IERC20;
+
+    // --- Config ---
+    address public owner;
+    IERC20 public usdc;
+    IUniswapV2RouterMock public router;
+
+    // --- Límites ---
+    uint256 public bankCap;     // máximo total permitido
+    uint256 public userCap;     // máximo por usuario
+    uint256 public minDeposit;  // depósito mínimo
+
+    // --- Balances ---
+    mapping(address => uint256) public balancesUSDC;
+
+    // --- Totales separados ---
+    uint256 public totalDepositedUSDC;
+    uint256 public totalDepositedETH;
+    uint256 public totalDepositedToken;
+    uint256 public totalWithdrawnUSDC;
+    uint256 public totalWithdrawnETH;
+    uint256 public totalWithdrawnToken;
+
+    // --- Eventos ---
+    event DepositUSDC(address indexed user, uint256 amount);
+    event DepositETHConverted(address indexed user, uint256 ethAmount, uint256 usdcReceived);
+    event DepositTokenConverted(address indexed user, address token, uint256 tokenAmount, uint256 usdcReceived);
+    event WithdrawUSDC(address indexed user, uint256 amount);
+    event WithdrawETH(address indexed user, uint256 usdcSpent, uint256 ethOut);
+    event WithdrawToken(address indexed user, uint256 usdcSpent, address token, uint256 tokenOut);
+    event SwapETHToToken(address indexed user, uint256 ethIn, address tokenOut, uint256 tokenReceived);
+    event TotalsUpdated(
+        uint256 totalDepositedUSDC,
+        uint256 totalDepositedETH,
+        uint256 totalDepositedToken,
+        uint256 totalWithdrawnUSDC,
+        uint256 totalWithdrawnETH,
+        uint256 totalWithdrawnToken
+    );
+
+    // --- Modifiers ---
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Not owner");
+        _;
+    }
+
+    constructor(address _router, address _usdc) {
+        owner = msg.sender;
+        router = IUniswapV2RouterMock(_router);
+        usdc = IERC20(_usdc);
+
+        // valores por defecto
+        bankCap = 1_000_000 * 10**6; // 1M USDC
+        userCap = 50_000 * 10**6;    // 50k USDC
+        minDeposit = 1 * 10**6;      // 1 USDC
+    }
+
+    // --- Admin ---
+    function setRouter(address _router) external onlyOwner {
+        router = IUniswapV2RouterMock(_router);
+    }
+
+    function setUSDC(address _usdc) external onlyOwner {
+        usdc = IERC20(_usdc);
+    }
+
+    function setBankCap(uint256 _cap) external onlyOwner {
+        bankCap = _cap;
+    }
+
+    function setUserCap(uint256 _cap) external onlyOwner {
+        userCap = _cap;
+    }
+
+    function setMinDeposit(uint256 _min) external onlyOwner {
+        minDeposit = _min;
+    }
+
+    // --- Depósitos ---
+
+    /// @notice Deposita USDC directo al banco
+    function depositUSDC(uint256 amount) external nonReentrant {
+        require(amount >= minDeposit, "Below min deposit");
+        require(totalUSDCInBank() + amount <= bankCap, "Bank cap reached");
+        require(balancesUSDC[msg.sender] + amount <= userCap, "User cap reached");
+
+        usdc.safeTransferFrom(msg.sender, address(this), amount);
+        balancesUSDC[msg.sender] += amount;
+        totalDepositedUSDC += amount;
+
+        emit DepositUSDC(msg.sender, amount);
+        _emitTotals();
+    }
+
+    /// @notice Deposita ETH y lo convierte a USDC
+    function depositETHAndConvertToUSDC(uint256 amountOutMin) external payable nonReentrant {
+        require(msg.value > 0, "No ETH sent");
+        require(msg.value >= minDeposit, "Below min deposit");
+        require(totalUSDCInBank() <= bankCap, "Bank cap reached");
+
+        uint256 usdcReceived = router.swapExactETHForTokens{value: msg.value}(amountOutMin, address(usdc), address(this));
+        balancesUSDC[msg.sender] += usdcReceived;
+        totalDepositedETH += msg.value;
+
+        emit DepositETHConverted(msg.sender, msg.value, usdcReceived);
+        _emitTotals();
+    }
+
+    /// @notice Deposita otro token y lo convierte a USDC
+    function depositTokenAndConvertToUSDC(address tokenIn, uint256 amount, uint256 amountOutMin) external nonReentrant {
+        require(amount > 0, "Invalid amount");
+        require(amount >= minDeposit, "Below min deposit");
+
+        IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), amount);
+        IERC20(tokenIn).safeApprove(address(router), amount);
+
+        uint256 usdcReceived = router.swapExactTokensForTokens(amount, amountOutMin, tokenIn, address(usdc), address(this));
+        balancesUSDC[msg.sender] += usdcReceived;
+        totalDepositedToken += amount;
+
+        emit DepositTokenConverted(msg.sender, tokenIn, amount, usdcReceived);
+        _emitTotals();
+    }
+
+    // --- Retiros ---
+
+    function withdrawUSDC(uint256 amount) external nonReentrant {
+        require(balancesUSDC[msg.sender] >= amount, "Insufficient balance");
+        balancesUSDC[msg.sender] -= amount;
+        totalWithdrawnUSDC += amount;
+
+        usdc.safeTransfer(msg.sender, amount);
+        emit WithdrawUSDC(msg.sender, amount);
+        _emitTotals();
+    }
+
+    /// @notice Convierte USDC a ETH y lo envía al usuario
+    function swapUSDCToETHAndWithdraw(uint256 amountUSDC, uint256 amountOutMin) external nonReentrant {
+        require(balancesUSDC[msg.sender] >= amountUSDC, "Insufficient balance");
+
+        balancesUSDC[msg.sender] -= amountUSDC;
+        usdc.safeApprove(address(router), amountUSDC);
+        uint256 ethOut = router.swapExactTokensForETH(amountUSDC, amountOutMin, address(usdc), msg.sender);
+
+        totalWithdrawnETH += ethOut;
+        emit WithdrawETH(msg.sender, amountUSDC, ethOut);
+        _emitTotals();
+    }
+
+    /// @notice Convierte USDC a otro token y lo envía al usuario
+    function swapUSDCToTokenAndWithdraw(uint256 amountUSDC, address tokenOut, uint256 amountOutMin) external nonReentrant {
+        require(balancesUSDC[msg.sender] >= amountUSDC, "Insufficient balance");
+
+        balancesUSDC[msg.sender] -= amountUSDC;
+        usdc.safeApprove(address(router), amountUSDC);
+
+        uint256 tokenOutAmt = router.swapExactTokensForTokens(amountUSDC, amountOutMin, address(usdc), tokenOut, msg.sender);
+        totalWithdrawnToken += tokenOutAmt;
+
+        emit WithdrawToken(msg.sender, amountUSDC, tokenOut, tokenOutAmt);
+        _emitTotals();
+    }
+
+    /// @notice Swap directo ETH -> Token (fuera del balance del banco)
+    function swapETHToTokenDirect(address tokenOut, uint256 amountOutMin) external payable nonReentrant {
+        require(msg.value > 0, "No ETH sent");
+        uint256 tokenReceived = router.swapExactETHForTokens{value: msg.value}(amountOutMin, tokenOut, msg.sender);
+
+        emit SwapETHToToken(msg.sender, msg.value, tokenOut, tokenReceived);
+    }
+
+    // --- Consultas ---
+    function totalUSDCInBank() public view returns (uint256) {
+        return usdc.balanceOf(address(this));
+    }
+
+    function getTotals()
+        external
+        view
+        returns (
+            uint256 _totalDepositedUSDC,
+            uint256 _totalDepositedETH,
+            uint256 _totalDepositedToken,
+            uint256 _totalWithdrawnUSDC,
+            uint256 _totalWithdrawnETH,
+            uint256 _totalWithdrawnToken
+        )
+    {
+        return (
+            totalDepositedUSDC,
+            totalDepositedETH,
+            totalDepositedToken,
+            totalWithdrawnUSDC,
+            totalWithdrawnETH,
+            totalWithdrawnToken
+        );
+    }
+
+    // --- Interno ---
+    function _emitTotals() internal {
+        emit TotalsUpdated(
+            totalDepositedUSDC,
+            totalDepositedETH,
+            totalDepositedToken,
+            totalWithdrawnUSDC,
+            totalWithdrawnETH,
+            totalWithdrawnToken
+        );
+    }
+
+    // --- Fallback ---
+    receive() external payable {}
+}
+
+
+
+
+
+
